@@ -1,0 +1,13 @@
+out/
+.bloop/
+.bsp/
+.direnv/
+.idea/
+.metals/
+.vscode/
+target/
+project/target/
+project/project/
+metals.sbt
+.env
+.DS_Store
