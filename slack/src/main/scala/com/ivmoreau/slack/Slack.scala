@@ -34,10 +34,10 @@ object Logger {
 
 type RET = AppMentionEvent
 
-object S {
+class S(queue: Queue[IO, RET]) {
 
-  def genApp(botToken: String): IO[(App, Queue[IO, RET])] = for {
-    queue <- Queue.unbounded[IO, RET]
+  def genApp(botToken: String): IO[App] = for {
+    _ <- IO.unit
     app = new App(AppConfig.builder().singleTeamBotToken(botToken).build())
     _ <-
       IO {
@@ -68,12 +68,12 @@ object S {
           }
         )
       }
-  } yield (app, queue)
+  } yield app
 
   def genStream(
       times: Int
   )(botToken: String, appToken: String): Stream[IO, Stream[IO, RET]] =
-    Stream.eval(genApp(botToken)).flatMap { case (app, queue) =>
+    Stream.eval(genApp(botToken)).flatMap { app =>
       Stream
         .eval(
           Logger.info("Starting Slack app") *> IO.blocking {
@@ -88,7 +88,7 @@ object S {
         )
         .evalMap { _ =>
           Logger.info("Starting Slack stream") *> IO {
-            Stream.fromQueueUnterminated(queue)
+            Stream.eval(queue.take).repeat
           }
         }
         .repeatN(times)
@@ -100,11 +100,19 @@ object Slacka {
       times: Int
   )(botToken: String, appToken: String): Stream[IO, RET] = {
     val empty: Stream[IO, RET] = Stream.empty
-    S.genStream(times)(botToken, appToken).chunkAll.flatMap { chunk =>
-      chunk.foldLeft(empty) { case (acc: Stream[IO, RET], stream) =>
-        acc.merge(stream)
-      }
-    }
+
+    Stream.eval {
+      Queue
+        .unbounded[IO, RET]
+        .map { queue =>
+          (new S(queue)).genStream(times)(botToken, appToken).chunkAll.flatMap {
+            chunk =>
+              chunk.foldLeft(empty) { case (acc: Stream[IO, RET], stream) =>
+                acc.merge(stream)
+              }
+          }
+        }
+    }.flatten
   }
 
   def apply(times: Int): Stream[IO, RET] = {
@@ -133,7 +141,7 @@ class SlackRespond(m: IO[MethodsClient]) {
 
 object SlackRespond {
   def apply(): IO[SlackRespond] = {
-    Env[IO].get("SLACK_APP_TOKEN").flatMap { maybe =>
+    Env[IO].get("SLACK_BOT_TOKEN").flatMap { maybe =>
       IO.fromOption(maybe)(new Exception("Maybe is None"))
         .flatMap(SlackRespond.withToken)
     }
