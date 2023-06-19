@@ -1,36 +1,19 @@
 package com.ivmoreau.slack
 
-import com.slack.api.bolt.App;
-import com.slack.api.bolt.socket_mode.SocketModeApp;
 import cats.effect.IO
-import cats.effect.std.Queue
-import com.slack.api.bolt.AppConfig
-import cats.effect.std.Dispatcher
-import com.slack.api.model.event.MessageEvent
-import com.slack.api.app_backend.events.payload.EventsApiPayload
+import cats.effect.std.{Dispatcher, Env, Queue}
 import fs2.Stream
-import cats.effect.std.Env
-import scala.util.Try
-import cats.effect.IOApp
-import cats.effect.std.Console
-import com.slack.api.socket_mode.SocketModeClient
-import org.slf4j
-import org.apache.logging.log4j.core.config.Configurator
-import org.apache.logging.log4j.core.config.DefaultConfiguration
-import com.slack.api.model.event.AppMentionEvent
-import scala.concurrent.duration.Duration
-import cats.effect.unsafe.implicits.global
+import com.slack.api.app_backend.events.payload.EventsApiPayload
+import com.slack.api.bolt.{App, AppConfig}
+import com.slack.api.bolt.socket_mode.SocketModeApp;
 import com.slack.api.methods.MethodsClient
 import com.slack.api.model.event.Event
+import com.slack.api.Slack
+import com.slack.api.socket_mode.SocketModeClient
+
+import scala.concurrent.duration.Duration
+import scala.util.Try
 import scala.reflect.{ClassTag, classTag}
-
-private object Logger {
-  var logger: org.slf4j.Logger = null
-
-  def debug(str: String): IO[Unit] = IO {
-    logger.debug(str)
-  }
-}
 
 class GenSlack[EventType <: Event: ClassTag](queue: Queue[IO, EventType])(
     implicit dispatch: Dispatcher[IO]
@@ -58,7 +41,7 @@ class GenSlack[EventType <: Event: ClassTag](queue: Queue[IO, EventType])(
     Stream.eval(genApp(botToken)).flatMap { app =>
       Stream
         .eval(
-          Logger.debug("Starting Slack app") *> IO.blocking {
+          IO.blocking {
             val socketModeApp: SocketModeApp = new SocketModeApp(
               appToken,
               SocketModeClient.Backend.JavaWebSocket,
@@ -69,11 +52,11 @@ class GenSlack[EventType <: Event: ClassTag](queue: Queue[IO, EventType])(
             .sleep(Duration(50, scala.concurrent.duration.MILLISECONDS))
         )
         .evalMap { _ =>
-          Logger.debug("Starting Slack stream") *> IO {
+          IO {
             Stream.eval(queue.take).repeat
           }
         }
-        .repeatN(times)
+        .repeatN(times.longValue())
     }
 }
 
@@ -120,11 +103,10 @@ object SlackStream {
 
   }
 }
-import com.slack.api.Slack;
+
 class SlackMethods(client: MethodsClient) {
   def send2Channel(chan: String)(text: String): IO[Unit] = {
-    Logger.debug(s"Sending message to Slack: $text at $chan") *>
-      IO.blocking { client.chatPostMessage { _.channel(chan).text(text) } }.void
+    IO.blocking { client.chatPostMessage { _.channel(chan).text(text) } }.void
   }
 
   def withMethod[A](f: MethodsClient => A): IO[A] = {
@@ -147,20 +129,5 @@ object SlackMethods {
       IO.blocking { a.methods(slackToken) }
     }
     methods.map(new SlackMethods(_))
-  }
-}
-
-object test extends IOApp.Simple {
-  def run: IO[Unit] = {
-    Configurator.initialize(new DefaultConfiguration())
-    Logger.logger = org.slf4j.LoggerFactory.getLogger("slackMessageStream")
-    SlackStream[AppMentionEvent](5)
-      .evalTap { a =>
-        val newMsg =
-          s"Hello ${a.getUser()}!, I'm a bot. You said ${a.getText()}. Thanks!"
-        SlackMethods().map(_.send2Channel(a.getChannel())(newMsg))
-      }
-      .compile
-      .drain
   }
 }
