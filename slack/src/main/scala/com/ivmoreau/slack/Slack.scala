@@ -21,8 +21,8 @@ import com.slack.api.model.event.AppMentionEvent
 import scala.concurrent.duration.Duration
 import cats.effect.unsafe.implicits.global
 import com.slack.api.methods.MethodsClient
-
-class Slacka {}
+import com.slack.api.model.event.Event
+import scala.reflect.{ClassTag, classTag}
 
 object Logger {
   var logger: org.slf4j.Logger = null
@@ -32,9 +32,7 @@ object Logger {
   }
 }
 
-type RET = AppMentionEvent
-
-class S(queue: Queue[IO, RET]) {
+class GenSlack[EventType <: Event: ClassTag](queue: Queue[IO, EventType]) {
 
   def genApp(botToken: String): IO[App] = for {
     _ <- IO.unit
@@ -42,28 +40,10 @@ class S(queue: Queue[IO, RET]) {
     _ <-
       IO {
         app.event(
-          classOf[MessageEvent],
-          (req: EventsApiPayload[MessageEvent], ctx) => {
-            val aa = req.getEvent()
-            Logger
-              .info(s"Received a message from Slack: ${aa.getUser()}")
-              .unsafeRunSync()
-            ctx.ack()
-          }
-        )
-      }
-    _ <-
-      IO {
-        app.event(
-          classOf[AppMentionEvent],
-          (req: EventsApiPayload[AppMentionEvent], ctx) => {
-            val aa = req.getEvent()
-            Logger
-              .info(
-                s"Received a mention from Slack: ${aa.getUser()} ${aa.getText()}"
-              )
-              .unsafeRunSync()
-            queue.offer(aa).unsafeRunSync()
+          classTag[EventType].runtimeClass.asInstanceOf[Class[EventType]],
+          (req: EventsApiPayload[EventType], ctx) => {
+            val event = req.getEvent()
+            queue.offer(event).unsafeRunSync()
             ctx.ack()
           }
         )
@@ -72,7 +52,7 @@ class S(queue: Queue[IO, RET]) {
 
   def genStream(
       times: Int
-  )(botToken: String, appToken: String): Stream[IO, Stream[IO, RET]] =
+  )(botToken: String, appToken: String): Stream[IO, Stream[IO, EventType]] =
     Stream.eval(genApp(botToken)).flatMap { app =>
       Stream
         .eval(
@@ -95,27 +75,30 @@ class S(queue: Queue[IO, RET]) {
     }
 }
 
-object Slacka {
-  def withTokens(
+object SlackStream {
+  def withTokens[EventType <: Event: ClassTag](
       times: Int
-  )(botToken: String, appToken: String): Stream[IO, RET] = {
-    val empty: Stream[IO, RET] = Stream.empty
+  )(botToken: String, appToken: String): Stream[IO, EventType] = {
+    val empty: Stream[IO, EventType] = Stream.empty
 
     Stream.eval {
       Queue
-        .unbounded[IO, RET]
+        .unbounded[IO, EventType]
         .map { queue =>
-          (new S(queue)).genStream(times)(botToken, appToken).chunkAll.flatMap {
-            chunk =>
-              chunk.foldLeft(empty) { case (acc: Stream[IO, RET], stream) =>
-                acc.merge(stream)
+          (new GenSlack(queue))
+            .genStream(times)(botToken, appToken)
+            .chunkAll
+            .flatMap { chunk =>
+              chunk.foldLeft(empty) {
+                case (acc: Stream[IO, EventType], stream) =>
+                  acc.merge(stream)
               }
-          }
+            }
         }
     }.flatten
   }
 
-  def apply(times: Int): Stream[IO, RET] = {
+  def apply[EventType <: Event: ClassTag](times: Int): Stream[IO, EventType] = {
 
     Stream
       .eval(for {
@@ -160,7 +143,7 @@ object test extends IOApp.Simple {
   def run: IO[Unit] = {
     Configurator.initialize(new DefaultConfiguration())
     Logger.logger = org.slf4j.LoggerFactory.getLogger("slackMessageStream")
-    Slacka(5)
+    SlackStream[AppMentionEvent](5)
       .evalTap { a =>
         val newMsg =
           s"Hello ${a.getUser()}!, I'm a bot. You said ${a.getText()}. Thanks!"
