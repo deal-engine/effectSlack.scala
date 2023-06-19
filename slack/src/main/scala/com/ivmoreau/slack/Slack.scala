@@ -24,26 +24,28 @@ import com.slack.api.methods.MethodsClient
 import com.slack.api.model.event.Event
 import scala.reflect.{ClassTag, classTag}
 
-object Logger {
+private object Logger {
   var logger: org.slf4j.Logger = null
 
-  def info(str: String): IO[Unit] = IO {
-    logger.info(str)
+  def debug(str: String): IO[Unit] = IO {
+    logger.debug(str)
   }
 }
 
-class GenSlack[EventType <: Event: ClassTag](queue: Queue[IO, EventType]) {
+class GenSlack[EventType <: Event: ClassTag](queue: Queue[IO, EventType])(
+    implicit dispatch: Dispatcher[IO]
+) {
 
   def genApp(botToken: String): IO[App] = for {
     _ <- IO.unit
     app = new App(AppConfig.builder().singleTeamBotToken(botToken).build())
     _ <-
-      IO {
+      IO.blocking {
         app.event(
           classTag[EventType].runtimeClass.asInstanceOf[Class[EventType]],
           (req: EventsApiPayload[EventType], ctx) => {
             val event = req.getEvent()
-            queue.offer(event).unsafeRunSync()
+            dispatch.unsafeRunSync(queue.offer(event))
             ctx.ack()
           }
         )
@@ -56,7 +58,7 @@ class GenSlack[EventType <: Event: ClassTag](queue: Queue[IO, EventType]) {
     Stream.eval(genApp(botToken)).flatMap { app =>
       Stream
         .eval(
-          Logger.info("Starting Slack app") *> IO.blocking {
+          Logger.debug("Starting Slack app") *> IO.blocking {
             val socketModeApp: SocketModeApp = new SocketModeApp(
               appToken,
               SocketModeClient.Backend.JavaWebSocket,
@@ -67,7 +69,7 @@ class GenSlack[EventType <: Event: ClassTag](queue: Queue[IO, EventType]) {
             .sleep(Duration(50, scala.concurrent.duration.MILLISECONDS))
         )
         .evalMap { _ =>
-          Logger.info("Starting Slack stream") *> IO {
+          Logger.debug("Starting Slack stream") *> IO {
             Stream.eval(queue.take).repeat
           }
         }
@@ -81,21 +83,27 @@ object SlackStream {
   )(botToken: String, appToken: String): Stream[IO, EventType] = {
     val empty: Stream[IO, EventType] = Stream.empty
 
-    Stream.eval {
-      Queue
-        .unbounded[IO, EventType]
-        .map { queue =>
-          (new GenSlack(queue))
-            .genStream(times)(botToken, appToken)
-            .chunkAll
-            .flatMap { chunk =>
-              chunk.foldLeft(empty) {
-                case (acc: Stream[IO, EventType], stream) =>
-                  acc.merge(stream)
+    val resourceStream: Stream[IO, Dispatcher[IO]] = Stream.resource {
+      Dispatcher.parallel[IO]
+    }
+
+    resourceStream.flatMap { implicit dispatcher =>
+      Stream.eval {
+        Queue
+          .unbounded[IO, EventType]
+          .map { queue =>
+            (new GenSlack(queue))
+              .genStream(times)(botToken, appToken)
+              .chunkAll
+              .flatMap { chunk =>
+                chunk.foldLeft(empty) {
+                  case (acc: Stream[IO, EventType], stream) =>
+                    acc.merge(stream)
+                }
               }
-            }
-        }
-    }.flatten
+          }
+      }.flatten
+    }
   }
 
   def apply[EventType <: Event: ClassTag](times: Int): Stream[IO, EventType] = {
@@ -113,29 +121,32 @@ object SlackStream {
   }
 }
 import com.slack.api.Slack;
-class SlackRespond(m: IO[MethodsClient]) {
+class SlackMethods(client: MethodsClient) {
   def send2Channel(chan: String)(text: String): IO[Unit] = {
-    Logger.info(s"Sending message to Slack: $text at $chan") *>
-      m.flatMap { a =>
-        IO.blocking { a.chatPostMessage { _.channel(chan).text(text) } }
-      }.void
+    Logger.debug(s"Sending message to Slack: $text at $chan") *>
+      IO.blocking { client.chatPostMessage { _.channel(chan).text(text) } }.void
+  }
+
+  def withMethod[A](f: MethodsClient => A): IO[A] = {
+    IO.blocking { f(client) }
   }
 }
 
-object SlackRespond {
-  def apply(): IO[SlackRespond] = {
-    Env[IO].get("SLACK_BOT_TOKEN").flatMap { maybe =>
+object SlackMethods {
+  def apply(): IO[SlackMethods] = {
+    val slackToken = Env[IO].get("SLACK_BOT_TOKEN").flatMap { maybe =>
       IO.fromOption(maybe)(new Exception("Maybe is None"))
-        .flatMap(SlackRespond.withToken)
     }
+
+    slackToken.flatMap(withToken)
   }
 
-  def withToken(slackToken: String): IO[SlackRespond] = {
+  def withToken(slackToken: String): IO[SlackMethods] = {
     val slack = IO { Slack.getInstance() }
     val methods = slack.flatMap { a =>
       IO.blocking { a.methods(slackToken) }
     }
-    IO { new SlackRespond(methods) }
+    methods.map(new SlackMethods(_))
   }
 }
 
@@ -147,8 +158,7 @@ object test extends IOApp.Simple {
       .evalTap { a =>
         val newMsg =
           s"Hello ${a.getUser()}!, I'm a bot. You said ${a.getText()}. Thanks!"
-        SlackRespond()
-          .flatMap { _.send2Channel(a.getChannel())(newMsg) }
+        SlackMethods().map(_.send2Channel(a.getChannel())(newMsg))
       }
       .compile
       .drain
