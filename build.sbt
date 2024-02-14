@@ -11,7 +11,7 @@ wartremoverErrors ++= Warts.unsafe
 
 val Scala3Version = "3.2.2"
 val Scala2_13Version = "2.13.10"
-val slackVersion = "1.29.1"
+val slackVersion = "1.38.1"
 
 ThisBuild / crossScalaVersions := Seq(Scala3Version, Scala2_13Version)
 ThisBuild / scalaVersion := Scala2_13Version
