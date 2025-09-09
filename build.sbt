@@ -11,7 +11,7 @@ wartremoverErrors ++= Warts.unsafe
 
 val Scala3Version = "3.2.2"
 val Scala2_13Version = "2.13.10"
-val slackVersion = "1.38.1"
+val slackVersion = "1.45.4"
 
 ThisBuild / crossScalaVersions := Seq(Scala3Version, Scala2_13Version)
 ThisBuild / scalaVersion := Scala2_13Version
@@ -24,10 +24,10 @@ lazy val slack = crossProject(JVMPlatform)
   .settings(
     name := "slack",
     libraryDependencies ++= Seq(
-      "org.typelevel" %% "cats-effect"                   % "3.5.0",
-      "co.fs2"        %% "fs2-core"                      % "3.7.0",
+      "org.typelevel" %% "cats-effect"                   % "3.6.3",
+      "co.fs2"        %% "fs2-core"                      % "3.12.2",
       "com.slack.api" %  "slack-api-client"              % s"${slackVersion}",
       "com.slack.api" %  "bolt-socket-mode"              % s"${slackVersion}",
-      "org.java-websocket" % "Java-WebSocket"            % "1.5.3",
+      "org.java-websocket" % "Java-WebSocket"            % "1.6.0",
     )
   )
